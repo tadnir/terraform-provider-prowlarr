@@ -7,6 +7,7 @@ import (
 	"github.com/devopsarr/prowlarr-go/prowlarr"
 	"github.com/devopsarr/terraform-provider-prowlarr/internal/helpers"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -45,21 +46,24 @@ type DownloadClientQbittorrentResource struct {
 
 // DownloadClientQbittorrent describes the download client data model.
 type DownloadClientQbittorrent struct {
-	Tags         types.Set    `tfsdk:"tags"`
-	Categories   types.Set    `tfsdk:"categories"`
-	Name         types.String `tfsdk:"name"`
-	Host         types.String `tfsdk:"host"`
-	URLBase      types.String `tfsdk:"url_base"`
-	Username     types.String `tfsdk:"username"`
-	Password     types.String `tfsdk:"password"`
-	Category     types.String `tfsdk:"category"`
-	ItemPriority types.Int64  `tfsdk:"item_priority"`
-	Priority     types.Int64  `tfsdk:"priority"`
-	Port         types.Int64  `tfsdk:"port"`
-	ID           types.Int64  `tfsdk:"id"`
-	InitialState types.Int64  `tfsdk:"initial_state"`
-	UseSsl       types.Bool   `tfsdk:"use_ssl"`
-	Enable       types.Bool   `tfsdk:"enable"`
+	Tags            types.Set    `tfsdk:"tags"`
+	Categories      types.Set    `tfsdk:"categories"`
+	Name            types.String `tfsdk:"name"`
+	Host            types.String `tfsdk:"host"`
+	URLBase         types.String `tfsdk:"url_base"`
+	Username        types.String `tfsdk:"username"`
+	Password        types.String `tfsdk:"password"`
+	APIKey          types.String `tfsdk:"api_key"`
+	APIKeyWO        types.String `tfsdk:"api_key_wo"`
+	APIKeyWOVersion types.Int64  `tfsdk:"api_key_wo_version"`
+	Category        types.String `tfsdk:"category"`
+	ItemPriority    types.Int64  `tfsdk:"item_priority"`
+	Priority        types.Int64  `tfsdk:"priority"`
+	Port            types.Int64  `tfsdk:"port"`
+	ID              types.Int64  `tfsdk:"id"`
+	InitialState    types.Int64  `tfsdk:"initial_state"`
+	UseSsl          types.Bool   `tfsdk:"use_ssl"`
+	Enable          types.Bool   `tfsdk:"enable"`
 }
 
 func (d DownloadClientQbittorrent) toDownloadClient() *DownloadClient {
@@ -71,6 +75,7 @@ func (d DownloadClientQbittorrent) toDownloadClient() *DownloadClient {
 		URLBase:        d.URLBase,
 		Username:       d.Username,
 		Password:       d.Password,
+		APIKey:         d.APIKey,
 		Category:       d.Category,
 		ItemPriority:   d.ItemPriority,
 		Priority:       d.Priority,
@@ -93,6 +98,7 @@ func (d *DownloadClientQbittorrent) fromDownloadClient(client *DownloadClient) {
 	d.URLBase = client.URLBase
 	d.Username = client.Username
 	d.Password = client.Password
+	d.APIKey = client.APIKey
 	d.Category = client.Category
 	d.ItemPriority = client.ItemPriority
 	d.Priority = client.Priority
@@ -194,6 +200,28 @@ func (r *DownloadClientQbittorrentResource) Schema(_ context.Context, _ resource
 				Computed:            true,
 				Sensitive:           true,
 			},
+			"api_key": schema.StringAttribute{
+				MarkdownDescription: "API key, instead of username and password. Requires qBittorrent 5.2 or later. Kept in state; use `api_key_wo` to keep it out.",
+				Optional:            true,
+				Computed:            true,
+				Sensitive:           true,
+				Validators: []validator.String{
+					stringvalidator.ConflictsWith(path.MatchRoot("api_key_wo")),
+				},
+			},
+			"api_key_wo": schema.StringAttribute{
+				MarkdownDescription: "API key, as `api_key`, but write-only: it is never stored in plan or state. It is sent on create and whenever `api_key_wo_version` changes. Requires Terraform 1.11 or later.",
+				Optional:            true,
+				Sensitive:           true,
+				WriteOnly:           true,
+			},
+			"api_key_wo_version": schema.Int64Attribute{
+				MarkdownDescription: "Version of `api_key_wo`. Change it to send a new `api_key_wo`.",
+				Optional:            true,
+				Validators: []validator.Int64{
+					int64validator.AlsoRequires(path.MatchRoot("api_key_wo")),
+				},
+			},
 			"category": schema.StringAttribute{
 				MarkdownDescription: "Category.",
 				Optional:            true,
@@ -220,8 +248,17 @@ func (r *DownloadClientQbittorrentResource) Create(ctx context.Context, req reso
 		return
 	}
 
+	// The write-only API key is only in the configuration.
+	var apiKeyWO types.String
+
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("api_key_wo"), &apiKeyWO)...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	// Create new DownloadClientQbittorrent
-	request := client.read(ctx, &resp.Diagnostics)
+	request := client.readWithAPIKeyWO(ctx, apiKeyWO, true, &resp.Diagnostics)
 
 	response, _, err := r.client.DownloadClientAPI.CreateDownloadClient(r.auth).DownloadClientResource(*request).Execute()
 	if err != nil {
@@ -270,8 +307,22 @@ func (r *DownloadClientQbittorrentResource) Update(ctx context.Context, req reso
 		return
 	}
 
+	// The write-only API key is only in the configuration. It is sent when its
+	// version changes; otherwise the app is told to keep the one it has.
+	var (
+		apiKeyWO     types.String
+		stateVersion types.Int64
+	)
+
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("api_key_wo"), &apiKeyWO)...)
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("api_key_wo_version"), &stateVersion)...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	// Update DownloadClientQbittorrent
-	request := client.read(ctx, &resp.Diagnostics)
+	request := client.readWithAPIKeyWO(ctx, apiKeyWO, !client.APIKeyWOVersion.Equal(stateVersion), &resp.Diagnostics)
 
 	response, _, err := r.client.DownloadClientAPI.UpdateDownloadClient(r.auth, strconv.Itoa(int(request.GetId()))).DownloadClientResource(*request).Execute()
 	if err != nil {
@@ -320,4 +371,21 @@ func (d *DownloadClientQbittorrent) write(ctx context.Context, downloadClient *p
 
 func (d *DownloadClientQbittorrent) read(ctx context.Context, diags *diag.Diagnostics) *prowlarr.DownloadClientResource {
 	return d.toDownloadClient().read(ctx, diags)
+}
+
+// readWithAPIKeyWO is read, with the API key taken from the write-only
+// api_key_wo when it is set: its value when send is true, otherwise the
+// masked value, which the app answers by keeping the key it has.
+func (d *DownloadClientQbittorrent) readWithAPIKeyWO(ctx context.Context, apiKeyWO types.String, send bool, diags *diag.Diagnostics) *prowlarr.DownloadClientResource {
+	client := d.toDownloadClient()
+
+	if !apiKeyWO.IsNull() && !apiKeyWO.IsUnknown() {
+		if send {
+			client.APIKey = apiKeyWO
+		} else {
+			client.APIKey = types.StringValue(helpers.SensitiveValue)
+		}
+	}
+
+	return client.read(ctx, diags)
 }

@@ -36,6 +36,11 @@ resource "prowlarr_download_client_qbittorrent" "example" {
 
 ### Optional
 
+> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
+
+- `api_key` (String, Sensitive) API key, instead of username and password. Requires qBittorrent 5.2 or later. Kept in state; use `api_key_wo` to keep it out.
+- `api_key_wo` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) API key, as `api_key`, but write-only: it is never stored in plan or state. It is sent on create and whenever `api_key_wo_version` changes. Requires Terraform 1.11 or later.
+- `api_key_wo_version` (Number) Version of `api_key_wo`. Change it to send a new `api_key_wo`.
 - `categories` (Attributes Set) List of mapped categories. (see [below for nested schema](#nestedatt--categories))
 - `category` (String) Category.
 - `enable` (Boolean) Enable flag.
