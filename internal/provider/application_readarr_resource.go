@@ -7,6 +7,7 @@ import (
 	"github.com/devopsarr/prowlarr-go/prowlarr"
 	"github.com/devopsarr/terraform-provider-prowlarr/internal/helpers"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -43,14 +44,16 @@ type ApplicationReadarrResource struct {
 
 // ApplicationReadarr describes the application data model.
 type ApplicationReadarr struct {
-	SyncCategories types.Set    `tfsdk:"sync_categories"`
-	Tags           types.Set    `tfsdk:"tags"`
-	Name           types.String `tfsdk:"name"`
-	SyncLevel      types.String `tfsdk:"sync_level"`
-	ProwlarrURL    types.String `tfsdk:"prowlarr_url"`
-	BaseURL        types.String `tfsdk:"base_url"`
-	APIKey         types.String `tfsdk:"api_key"`
-	ID             types.Int64  `tfsdk:"id"`
+	SyncCategories  types.Set    `tfsdk:"sync_categories"`
+	Tags            types.Set    `tfsdk:"tags"`
+	Name            types.String `tfsdk:"name"`
+	SyncLevel       types.String `tfsdk:"sync_level"`
+	ProwlarrURL     types.String `tfsdk:"prowlarr_url"`
+	BaseURL         types.String `tfsdk:"base_url"`
+	APIKey          types.String `tfsdk:"api_key"`
+	APIKeyWO        types.String `tfsdk:"api_key_wo"`
+	APIKeyWOVersion types.Int64  `tfsdk:"api_key_wo_version"`
+	ID              types.Int64  `tfsdk:"id"`
 }
 
 func (a ApplicationReadarr) toApplication() *Application {
@@ -121,9 +124,26 @@ func (r *ApplicationReadarrResource) Schema(_ context.Context, _ resource.Schema
 				Required:            true,
 			},
 			"api_key": schema.StringAttribute{
-				MarkdownDescription: "API key.",
-				Required:            true,
+				MarkdownDescription: "API key. Either this or `api_key_wo` is required. Kept in state; use `api_key_wo` to keep it out.",
+				Optional:            true,
+				Computed:            true,
 				Sensitive:           true,
+				Validators: []validator.String{
+					stringvalidator.ExactlyOneOf(path.MatchRoot("api_key"), path.MatchRoot("api_key_wo")),
+				},
+			},
+			"api_key_wo": schema.StringAttribute{
+				MarkdownDescription: "API key, as `api_key`, but write-only: it is never stored in plan or state. It is sent on create and whenever `api_key_wo_version` changes. Requires Terraform 1.11 or later.",
+				Optional:            true,
+				Sensitive:           true,
+				WriteOnly:           true,
+			},
+			"api_key_wo_version": schema.Int64Attribute{
+				MarkdownDescription: "Version of `api_key_wo`. Change it to send a new `api_key_wo`.",
+				Optional:            true,
+				Validators: []validator.Int64{
+					int64validator.AlsoRequires(path.MatchRoot("api_key_wo")),
+				},
 			},
 			"sync_categories": schema.SetAttribute{
 				MarkdownDescription: "Sync categories.",
@@ -152,8 +172,17 @@ func (r *ApplicationReadarrResource) Create(ctx context.Context, req resource.Cr
 		return
 	}
 
+	// The write-only API key is only in the configuration.
+	var apiKeyWO types.String
+
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("api_key_wo"), &apiKeyWO)...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	// Create new ApplicationReadarr
-	request := application.read(ctx, &resp.Diagnostics)
+	request := application.readWithAPIKeyWO(ctx, apiKeyWO, true, &resp.Diagnostics)
 
 	response, _, err := r.client.ApplicationAPI.CreateApplications(r.auth).ApplicationResource(*request).Execute()
 	if err != nil {
@@ -202,8 +231,22 @@ func (r *ApplicationReadarrResource) Update(ctx context.Context, req resource.Up
 		return
 	}
 
+	// The write-only API key is only in the configuration. It is sent when its
+	// version changes; otherwise the app is told to keep the one it has.
+	var (
+		apiKeyWO     types.String
+		stateVersion types.Int64
+	)
+
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("api_key_wo"), &apiKeyWO)...)
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("api_key_wo_version"), &stateVersion)...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	// Update ApplicationReadarr
-	request := application.read(ctx, &resp.Diagnostics)
+	request := application.readWithAPIKeyWO(ctx, apiKeyWO, !application.APIKeyWOVersion.Equal(stateVersion), &resp.Diagnostics)
 
 	response, _, err := r.client.ApplicationAPI.UpdateApplications(r.auth, strconv.Itoa(int(request.GetId()))).ApplicationResource(*request).Execute()
 	if err != nil {
@@ -252,4 +295,21 @@ func (a *ApplicationReadarr) write(ctx context.Context, application *prowlarr.Ap
 
 func (a *ApplicationReadarr) read(ctx context.Context, diags *diag.Diagnostics) *prowlarr.ApplicationResource {
 	return a.toApplication().read(ctx, diags)
+}
+
+// readWithAPIKeyWO is read, with the API key taken from the write-only
+// api_key_wo when it is set: its value when send is true, otherwise the
+// masked value, which the app answers by keeping the key it has.
+func (a *ApplicationReadarr) readWithAPIKeyWO(ctx context.Context, apiKeyWO types.String, send bool, diags *diag.Diagnostics) *prowlarr.ApplicationResource {
+	application := a.toApplication()
+
+	if !apiKeyWO.IsNull() && !apiKeyWO.IsUnknown() {
+		if send {
+			application.APIKey = apiKeyWO
+		} else {
+			application.APIKey = types.StringValue(helpers.SensitiveValue)
+		}
+	}
+
+	return application.read(ctx, diags)
 }

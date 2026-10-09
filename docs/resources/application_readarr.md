@@ -31,7 +31,6 @@ resource "prowlarr_application_readarr" "example" {
 
 ### Required
 
-- `api_key` (String, Sensitive) API key.
 - `base_url` (String) Base URL.
 - `name` (String) Application name.
 - `prowlarr_url` (String) Prowlarr URL.
@@ -39,6 +38,11 @@ resource "prowlarr_application_readarr" "example" {
 
 ### Optional
 
+> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
+
+- `api_key` (String, Sensitive) API key. Either this or `api_key_wo` is required. Kept in state; use `api_key_wo` to keep it out.
+- `api_key_wo` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) API key, as `api_key`, but write-only: it is never stored in plan or state. It is sent on create and whenever `api_key_wo_version` changes. Requires Terraform 1.11 or later.
+- `api_key_wo_version` (Number) Version of `api_key_wo`. Change it to send a new `api_key_wo`.
 - `sync_categories` (Set of Number) Sync categories.
 - `tags` (Set of Number) List of associated tags.
 
